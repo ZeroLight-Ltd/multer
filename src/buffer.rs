@@ -30,14 +30,17 @@ impl<'r> StreamBuffer<'r> {
     }
 
     pub fn poll_stream(&mut self, cx: &mut Context<'_>) -> Result<(), crate::Error> {
+        static POLL_LIMIT: usize = 250 * 1024; // 250kb
         if self.eof {
             return Ok(());
         }
 
+        let mut bytes_this_loop = 0;
         loop {
             match self.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(data))) => {
                     self.stream_size_counter += data.len() as u64;
+                    bytes_this_loop += data.len();
 
                     if self.stream_size_counter > self.whole_stream_size_limit {
                         return Err(crate::Error::StreamSizeExceeded {
@@ -45,7 +48,13 @@ impl<'r> StreamBuffer<'r> {
                         });
                     }
 
-                    self.buf.extend_from_slice(&data)
+                    self.buf.extend_from_slice(&data);
+
+                    if bytes_this_loop > POLL_LIMIT {
+                        // don't let self.buf grow too large if the incoming stream has
+                        // returned Poll::Ready too many times
+                        return Ok(());
+                    }
                 }
                 Poll::Ready(Some(Err(err))) => return Err(err),
                 Poll::Ready(None) => {
