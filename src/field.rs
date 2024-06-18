@@ -338,33 +338,42 @@ impl Stream for Field<'_> {
         };
 
         let state = &mut *lock;
-        if let Err(err) = state.buffer.poll_stream(cx) {
-            return Poll::Ready(Some(Err(crate::Error::StreamReadFailed(err.into()))));
-        }
+        let mut stream_polled = false;
+        loop {
+            match state
+                .buffer
+                .read_field_data(&state.boundary, state.curr_field_name.as_deref())
+            {
+                Ok(Some((done, bytes))) => {
+                    state.curr_field_size_counter += bytes.len() as u64;
 
-        match state
-            .buffer
-            .read_field_data(&state.boundary, state.curr_field_name.as_deref())
-        {
-            Ok(Some((done, bytes))) => {
-                state.curr_field_size_counter += bytes.len() as u64;
+                    if state.curr_field_size_counter > state.curr_field_size_limit {
+                        return Poll::Ready(Some(Err(crate::Error::FieldSizeExceeded {
+                            limit: state.curr_field_size_limit,
+                            field_name: state.curr_field_name.clone(),
+                        })));
+                    }
 
-                if state.curr_field_size_counter > state.curr_field_size_limit {
-                    return Poll::Ready(Some(Err(crate::Error::FieldSizeExceeded {
-                        limit: state.curr_field_size_limit,
-                        field_name: state.curr_field_name.clone(),
-                    })));
+                    if done {
+                        state.stage = StreamingStage::ReadingBoundary;
+                        self.done = true;
+                    }
+
+                    return Poll::Ready(Some(Ok(bytes)));
                 }
-
-                if done {
-                    state.stage = StreamingStage::ReadingBoundary;
-                    self.done = true;
+                Ok(None) => {
+                    if stream_polled {
+                        return Poll::Pending;
+                    } else {
+                        if let Err(err) = state.buffer.poll_stream(cx) {
+                            return Poll::Ready(Some(Err(crate::Error::StreamReadFailed(err.into()))));
+                        }
+                        stream_polled = true;
+                        continue;
+                    }
                 }
-
-                Poll::Ready(Some(Ok(bytes)))
+                Err(err) => return Poll::Ready(Some(Err(err))),
             }
-            Ok(None) => Poll::Pending,
-            Err(err) => Poll::Ready(Some(Err(err))),
         }
     }
 }
