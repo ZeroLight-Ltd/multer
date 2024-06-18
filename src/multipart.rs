@@ -256,15 +256,17 @@ impl<'r> Multipart<'r> {
                         // If we have polled the stream once and we still need more we must now wait
                         return Poll::Pending;
                     } else {
+                        if state.buffer.eof {
+                            // We need more but the stream has ended
+                            let buf = String::from_utf8_lossy(&*state.buffer.buf);
+                            return Poll::Ready(Err(crate::Error::IncompleteStream));
+                        }
+
                         // Correctness: poll_stream polls until either eof or the inner stream
                         // returns Poll::Pending so if it returns Ok(()) we can safely assume it has
                         // registered to be woken up
                         if let Err(err) = state.buffer.poll_stream(cx) {
                             return Poll::Ready(Err(crate::Error::StreamReadFailed(err.into())));
-                        }
-                        if state.buffer.eof {
-                            // We need more but the stream has ended
-                            return Poll::Ready(Err(crate::Error::IncompleteStream));
                         }
                         stream_polled = true;
                     }
@@ -422,7 +424,7 @@ impl<'r> Multipart<'r> {
                 content_disposition,
             });
         }
-        return Ok(ParseUpToNextFieldResult::NeedMore);
+        unreachable!()
     }
 
     /// Yields the next [`Field`] with their positioning index as a tuple
