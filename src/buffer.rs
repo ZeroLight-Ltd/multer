@@ -9,6 +9,7 @@ use crate::constants;
 
 pub(crate) struct StreamBuffer<'r> {
     pub(crate) eof: bool,
+    buf_cap: usize,
     pub(crate) buf: BytesMut,
     pub(crate) stream: Pin<Box<dyn Stream<Item = Result<Bytes, crate::Error>> + Send + 'r>>,
     pub(crate) whole_stream_size_limit: u64,
@@ -23,6 +24,7 @@ impl<'r> StreamBuffer<'r> {
         StreamBuffer {
             eof: false,
             buf: BytesMut::new(),
+            buf_cap: 0,
             stream: Box::pin(stream),
             whole_stream_size_limit,
             stream_size_counter: 0,
@@ -49,6 +51,13 @@ impl<'r> StreamBuffer<'r> {
                     }
 
                     self.buf.extend_from_slice(&data);
+                    if self.buf.capacity() > self.buf_cap {
+                        let new_cap = self.buf.capacity();
+                        //println!("NEW HIGHEST BUF CAP: {} => {new_cap}", self.buf_cap);
+                        self.buf_cap = new_cap;
+                    }
+
+                    //assert!(self.buf.capacity() < 5 * 1024 * 1024);
 
                     if bytes_this_loop > POLL_LIMIT {
                         // don't let self.buf grow too large if the incoming stream has
@@ -167,7 +176,9 @@ impl<'r> StreamBuffer<'r> {
     }
 
     pub fn read_full_buf(&mut self) -> Bytes {
-        self.buf.split_to(self.buf.len()).freeze()
+        let bytes = self.buf.split_to(self.buf.len()).freeze();
+        //self.buf = BytesMut::new();
+        bytes
     }
 }
 

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -79,6 +80,10 @@ pub struct Multipart<'r> {
 #[derive(Debug)]
 pub(crate) struct MultipartState<'r> {
     pub(crate) buffer: StreamBuffer<'r>,
+    pub(crate) needs_poll: bool,
+    last_cap: usize,
+    last_stage: Option<StreamingStage>,
+    buf_cap: usize,
     pub(crate) boundary: String,
     pub(crate) stage: StreamingStage,
     pub(crate) next_field_idx: usize,
@@ -128,6 +133,10 @@ impl<'r> Multipart<'r> {
         Multipart {
             state: Arc::new(Mutex::new(MultipartState {
                 buffer: StreamBuffer::new(stream, constraints.size_limit.whole_stream),
+                needs_poll: true,
+                buf_cap: 0,
+                last_cap: 0,
+                last_stage: None,
                 boundary: boundary.into(),
                 stage: StreamingStage::FindingFirstBoundary,
                 next_field_idx: 0,
@@ -228,7 +237,18 @@ impl<'r> Multipart<'r> {
             return Err(Error::LockFailure);
         }
 
-        future::poll_fn(|cx| self.poll_next_field(cx)).await
+        future::poll_fn(|cx| {
+            let p = self.poll_next_field(cx);
+            match &p {
+                Poll::Ready(_) => (),
+                Poll::Pending => {
+                    let len = self.state.try_lock().unwrap().buffer.buf.len();
+                    println!("pending and buf size is: {len}");
+                }
+            }
+            p
+        })
+        .await
     }
 
     // CORRECTNESS: This method must only be called only when it is guaranteed
@@ -242,12 +262,42 @@ impl<'r> Multipart<'r> {
         };
 
         let state = &mut *lock;
+
+        let this_cap = state.buffer.buf.len();
+        if this_cap > state.last_cap {
+            println!(
+                "buffer len increase. to {} => {this_cap}. stage: {:?} => {:?}",
+                state.last_cap, state.last_stage, state.stage
+            );
+            if this_cap > 100 * 1024 * 1024 {
+                println!("this is getting silly");
+                {
+                    let mut f = std::fs::File::create("buffer.buf").unwrap();
+                    f.write_all(&state.buffer.buf).unwrap();
+                    f.flush().unwrap();
+                }
+
+                std::process::exit(1);
+            }
+            state.last_cap = this_cap;
+        }
+        state.last_stage = Some(state.stage);
+
         if state.stage == StreamingStage::Eof {
             return Poll::Ready(Ok(None));
         }
 
-        if let Err(err) = state.buffer.poll_stream(cx) {
-            return Poll::Ready(Err(crate::Error::StreamReadFailed(err.into())));
+        if state.needs_poll {
+            let before = state.buffer.buf.capacity();
+            if let Err(err) = state.buffer.poll_stream(cx) {
+                return Poll::Ready(Err(crate::Error::StreamReadFailed(err.into())));
+            }
+            let after = state.buffer.buf.capacity();
+            if before < after {
+                let buf_len = state.buffer.buf.len();
+                println!("polling the buffer increased it's size {before} => {after}. Buf len is currently {buf_len}");
+            }
+            state.needs_poll = false;
         }
 
         if state.stage == StreamingStage::FindingFirstBoundary {
@@ -285,10 +335,14 @@ impl<'r> Multipart<'r> {
                     if done {
                         state.stage = StreamingStage::ReadingBoundary;
                     } else {
+                        state.needs_poll = true;
+                        cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
                 }
                 None => {
+                    state.needs_poll = true;
+                    cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
             }
@@ -304,6 +358,8 @@ impl<'r> Multipart<'r> {
                     return if state.buffer.eof {
                         Poll::Ready(Err(crate::Error::IncompleteStream))
                     } else {
+                        state.needs_poll = true;
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     };
                 }
@@ -324,6 +380,8 @@ impl<'r> Multipart<'r> {
                     return if state.buffer.eof {
                         Poll::Ready(Err(crate::Error::IncompleteStream))
                     } else {
+                        state.needs_poll = true;
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     };
                 }
@@ -342,6 +400,8 @@ impl<'r> Multipart<'r> {
                 return if state.buffer.eof {
                     Poll::Ready(Err(crate::Error::IncompleteStream))
                 } else {
+                    state.needs_poll = true;
+                    cx.waker().wake_by_ref();
                     Poll::Pending
                 };
             }
@@ -353,6 +413,8 @@ impl<'r> Multipart<'r> {
                     return if state.buffer.eof {
                         Poll::Ready(Err(crate::Error::IncompleteStream))
                     } else {
+                        state.needs_poll = true;
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     };
                 }
@@ -372,6 +434,8 @@ impl<'r> Multipart<'r> {
                     return if state.buffer.eof {
                         return Poll::Ready(Err(crate::Error::IncompleteStream));
                     } else {
+                        state.needs_poll = true;
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     };
                 }
@@ -421,6 +485,8 @@ impl<'r> Multipart<'r> {
             return Poll::Ready(Ok(Some(field)));
         }
 
+        cx.waker().wake_by_ref();
+        state.needs_poll = true;
         Poll::Pending
     }
 

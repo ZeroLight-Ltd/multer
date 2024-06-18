@@ -59,6 +59,7 @@ pub struct Field<'r> {
     content_disposition: ContentDisposition,
     content_type: Option<mime::Mime>,
     idx: usize,
+    buf_size_at_start: usize,
 }
 
 impl<'r> Field<'r> {
@@ -69,6 +70,7 @@ impl<'r> Field<'r> {
         content_disposition: ContentDisposition,
     ) -> Self {
         let content_type = helpers::parse_content_type(&headers);
+        let buf_size_at_start = state.try_lock().unwrap().buffer.buf.len();
         Field {
             state,
             headers,
@@ -76,6 +78,7 @@ impl<'r> Field<'r> {
             content_type,
             idx,
             done: false,
+            buf_size_at_start,
         }
     }
 
@@ -338,8 +341,10 @@ impl Stream for Field<'_> {
         };
 
         let state = &mut *lock;
-        if let Err(err) = state.buffer.poll_stream(cx) {
-            return Poll::Ready(Some(Err(crate::Error::StreamReadFailed(err.into()))));
+        if state.needs_poll {
+            if let Err(err) = state.buffer.poll_stream(cx) {
+                return Poll::Ready(Some(Err(crate::Error::StreamReadFailed(err.into()))));
+            }
         }
 
         match state
@@ -357,13 +362,22 @@ impl Stream for Field<'_> {
                 }
 
                 if done {
+                    let buf_size_at_end = state.buffer.buf.len();
+                    // println!(
+                    //     "FINISH FIELD: buffer: {} {}. Headers {:?}",
+                    //     self.buf_size_at_start, buf_size_at_end, self.headers
+                    // );
                     state.stage = StreamingStage::ReadingBoundary;
                     self.done = true;
                 }
 
                 Poll::Ready(Some(Ok(bytes)))
             }
-            Ok(None) => Poll::Pending,
+            Ok(None) => {
+                state.needs_poll = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(err) => Poll::Ready(Some(Err(err))),
         }
     }
