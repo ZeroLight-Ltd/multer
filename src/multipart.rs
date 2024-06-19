@@ -424,6 +424,16 @@ impl<'r> Multipart<'r> {
                 content_disposition,
             });
         }
+        /*
+            Should be unreacable. It's not clear what would be safe to do
+            if this is reached.
+            * if we loop back to the start, it's not any more "obvious" that progress
+              can be made that that this is unreachable. Similar issue for calling
+              the waker ourselves and returning Poll::Pending
+            * if we have the caller return Poll::Pending, we may not have not polled the
+              underlying stream which means we might never get woken up again
+            * if we return NeedMore we may end up buffering more than we need, using memory.
+        */
         unreachable!()
     }
 
